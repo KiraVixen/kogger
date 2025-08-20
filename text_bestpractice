@@ -1,0 +1,565 @@
+**collect Calico CNI logs** end-to-end on a fresh cluster (1 control-plane + 1 worker).
+You’ll get:
+
+* a **quick, ad-hoc** path (copy logs off the node), and
+* a **best-practice, continuous** path (Promtail → Loki → Grafana).
+
+I’ve added **before/after verification** for each step, plus **flag/keyword explanations** right under every command block.
+This also includes a **repeatable load generator** to produce **plenty of CNI events (ADD/DEL)** so you have rich sample data.
+
+---
+
+# 0) Pre-flight: confirm cluster + find Calico
+
+### Before
+
+```bash
+kubectl version --short
+kubectl get nodes -o wide
+kubectl get ns
+kubectl get pods -A -o wide | egrep -i 'calico|typha|canal'
+```
+
+**What the flags/keywords mean**
+
+* `kubectl version --short` → compact client/server version.
+* `kubectl get nodes -o wide`
+
+  * `-o wide` → print extra columns (internal IP, OS image, etc.).
+* `kubectl get ns` → list namespaces.
+* `kubectl get pods -A -o wide`
+
+  * `-A` → all namespaces.
+  * `-o wide` → extra columns.
+* `egrep -i '...'`
+
+  * `-i` → case-insensitive.
+  * Regular expression finds Calico pods (e.g., `calico-node`, `calico-kube-controllers`, `typha`, or `canal`).
+
+> Note which namespace Calico runs in: commonly `calico-system` (operator install) or `kube-system` (manifest/canal).
+
+### After (set a helper variable)
+
+```bash
+export CALICO_NS=calico-system   # or: kube-system
+kubectl -n "$CALICO_NS" get ds,deploy,cm | egrep -i 'calico|canal'
+```
+
+**Flags/keywords**
+
+* `export CALICO_NS=...` → shell env var used later.
+* `kubectl -n "$CALICO_NS"`
+
+  * `-n` → target namespace.
+* `get ds,deploy,cm` → list **D**aemon**S**ets, **Deploy**ments, **C**onfig**M**aps.
+
+---
+
+# 1) Snapshot Calico component logs (not CNI yet)
+
+### Before
+
+```bash
+kubectl -n "$CALICO_NS" get ds/calico-node -o wide
+kubectl -n "$CALICO_NS" get deploy -l k8s-app=calico-kube-controllers -o wide
+```
+
+**Flags/keywords**
+
+* `get ds/calico-node` → get the DaemonSet named `calico-node`.
+* `-l k8s-app=calico-kube-controllers` → label selector.
+* `-o wide` → extra columns.
+
+### Collect logs
+
+```bash
+kubectl -n "$CALICO_NS" logs ds/calico-node --all-containers=true --prefix --tail=500
+kubectl -n "$CALICO_NS" logs deploy/calico-kube-controllers --all-containers=true --prefix --tail=300
+```
+
+**Flags/keywords**
+
+* `logs ds/...` or `logs deploy/...` → aggregate logs from all pods owned by that resource.
+* `--all-containers=true` → include sidecars/aux containers.
+* `--prefix` → prefix each line with pod name for clarity.
+* `--tail=NUM` → only last N lines (avoid flooding the terminal).
+
+### After
+
+```bash
+kubectl -n "$CALICO_NS" get events --sort-by=.lastTimestamp | tail -n 20
+```
+
+**Flags/keywords**
+
+* `get events` → recent issues/warnings.
+* `--sort-by=.lastTimestamp` → newest last.
+* `tail -n 20` → last 20 lines.
+
+> These confirm core Calico health. The **CNI plugin logs** themselves live on the **node filesystem** (next step).
+
+---
+
+# 2) Verify CNI plugin configuration & log location on the node
+
+### Before
+
+```bash
+kubectl get nodes -o name
+```
+
+**Flags/keywords**
+
+* `-o name` → output resource names only (e.g., `node/worker-1`).
+
+### Inspect (enter node via `kubectl debug`, then `chroot` into host)
+
+```bash
+NODE=$(kubectl get nodes -o name | head -n1 | sed 's|node/||')
+kubectl debug node/$NODE -it --image=busybox:1.36 --privileged -- \
+  chroot /host sh -lc '
+    ls -al /var/log/calico/cni || true
+    grep -nE "(log_level|log_file_path)" /etc/cni/net.d/* 2>/dev/null || true
+  '
+```
+
+**Flags/keywords**
+
+* `NODE=$(...)` → shell capture of the first node name.
+* `kubectl debug node/$NODE` → start an **ephemeral debug pod** targeting that node.
+* `-it` → **i**nteractive + **t**ty (so you can run a shell).
+* `--image=busybox:1.36` → container image to run.
+* `--privileged` → grant elevated privileges (needed to access host paths).
+* `--` → end of kubectl flags; everything after goes **inside** the container.
+* `chroot /host` → change root to the **host filesystem** (the debug pod mounts host at `/host`).
+* `sh -lc '...'` → run a shell and a command string.
+* `ls -al` → long listing incl. hidden files.
+* `grep -nE` → show **n** line numbers; **E** extended regex.
+* `|| true` → never fail the overall script if a file isn’t present.
+
+**What to expect**
+
+* Directory exists: `/var/log/calico/cni/` (e.g., `cni.log`).
+* In `/etc/cni/net.d/10-calico.conflist`, typical keys include `"log_level"` and `"log_file_path"`.
+
+---
+
+# 3) Generate **ample CNI activity** (ADD/DEL) for sample data
+
+We’ll create a namespace, a few one-off pods, a Deployment we can scale, and a short-lived Job that creates many pods quickly.
+
+### 3.1 Create a test namespace
+
+```bash
+kubectl create namespace net-test
+kubectl get ns net-test
+```
+
+**Flags/keywords**
+
+* `create namespace NAME` → make a new namespace.
+* `get ns NAME` → verify it exists.
+
+### 3.2 Minimal pods (quick ADD/DEL)
+
+```bash
+kubectl -n net-test run cni-a --image=registry.k8s.io/pause:3.9 --restart=Never
+kubectl -n net-test run cni-b --image=registry.k8s.io/pause:3.9 --restart=Never
+kubectl -n net-test get pods -o wide
+kubectl -n net-test delete pod cni-b --wait=true
+```
+
+**Flags/keywords**
+
+* `run NAME --image=...` → create a single-pod workload quickly.
+* `--restart=Never` → create a **Pod** (not a Deployment).
+* `get pods -o wide` → show scheduling/node/IP info.
+* `delete pod NAME --wait=true`
+
+  * `--wait=true` → block until deletion complete (ensures CNI **DEL** happens).
+
+### 3.3 A scalable Deployment (batch ADD/DEL)
+
+```bash
+kubectl -n net-test create deployment cni-batch --image=registry.k8s.io/pause:3.9
+kubectl -n net-test scale deployment cni-batch --replicas=15
+kubectl -n net-test get deploy cni-batch
+kubectl -n net-test get pods -l app=cni-batch -o wide
+kubectl -n net-test scale deployment cni-batch --replicas=0
+```
+
+**Flags/keywords**
+
+* `create deployment NAME --image=...` → create a Deployment with 1 replica.
+* `scale deployment NAME --replicas=N` → change replica count (triggers many **ADD**).
+* `-l app=cni-batch` → label selector.
+* Scaling to `0` triggers **DEL** for all replicas.
+
+### 3.4 High-churn Job (lots of short-lived pods)
+
+```bash
+cat <<'EOF' | kubectl -n net-test apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cni-churn
+spec:
+  completions: 25
+  parallelism: 5
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: worker
+        image: busybox:1.36
+        command: ["sh","-lc","sleep 2"]
+EOF
+
+kubectl -n net-test get job cni-churn
+kubectl -n net-test get pods -l job-name=cni-churn -o wide
+kubectl -n net-test wait --for=condition=complete job/cni-churn --timeout=180s
+```
+
+**Flags/keywords**
+
+* `apply -f -` → read manifest from STDIN.
+* `Job.spec.completions` → total pods to run to completion.
+* `Job.spec.parallelism` → how many run at once.
+* `restartPolicy: Never` → pods don’t restart; new pods are created (more ADD/DEL).
+* `command: ["sh","-lc","sleep 2"]` → short lifespan to force churn.
+* `wait --for=condition=complete job/NAME --timeout=180s` → block until Job completes (ensures DELs fire soon after).
+
+> After 3.2–3.4 you’ll have **plenty** of CNI plugin entries: `ADD` on pod creation, `DEL` on termination.
+
+---
+
+# 4) Best-practice, continuous collection: **Promtail → Loki → Grafana**
+
+You already have Grafana. We’ll deploy **Loki** (log store) and **Promtail** (node agent that tails files, including `/var/log/calico/cni/*.log`).
+
+### 4.1 Create an observability namespace
+
+```bash
+kubectl get ns observability || true
+kubectl create ns observability
+kubectl get ns observability
+```
+
+**Flags/keywords**
+
+* `|| true` → do not fail if it doesn’t exist.
+
+### 4.2 Install **Loki** (single-binary) via Helm
+
+```bash
+helm repo add grafana https://grafana.github.io/helm-charts
+helm repo update
+helm install loki grafana/loki -n observability \
+  --set loki.auth_enabled=false \
+  --set persistence.enabled=false
+kubectl -n observability get pods -l app.kubernetes.io/name=loki -o wide
+kubectl -n observability get svc loki
+```
+
+**Flags/keywords**
+
+* `helm repo add NAME URL` → add chart repo.
+* `helm repo update` → refresh chart index.
+* `helm install RELEASE CHART -n NAMESPACE` → install chart.
+* `--set loki.auth_enabled=false` → disable Loki auth (easy lab; enable in prod).
+* `--set persistence.enabled=false` → ephemeral storage (fine for test).
+* `get pods -l app.kubernetes.io/name=loki` → show Loki pods via label.
+* `get svc loki` → confirm service endpoint.
+
+### 4.3 Install **Promtail** and mount Calico CNI logs
+
+```bash
+helm install promtail grafana/promtail -n observability --values - <<'EOF'
+config:
+  clients:
+    - url: http://loki.observability.svc.cluster.local:3100/loki/api/v1/push
+  snippets:
+    extraScrapeConfigs: |
+      - job_name: calico-cni
+        static_configs:
+          - targets: [localhost]
+            labels:
+              job: calico-cni
+              __path__: /var/log/calico/cni/*.log
+extraVolumeMounts:
+  - name: varlog-calico-cni
+    mountPath: /var/log/calico/cni
+    readOnly: true
+extraVolumes:
+  - name: varlog-calico-cni
+    hostPath:
+      path: /var/log/calico/cni
+      type: DirectoryOrCreate
+EOF
+
+kubectl -n observability get ds promtail -o wide
+kubectl -n observability get pods -l app.kubernetes.io/name=promtail -o wide
+kubectl -n observability logs ds/promtail --tail=100 | egrep -i 'tailing|calico|cni' || true
+```
+
+**Flags/keywords**
+
+* `--values - <<'EOF' ... EOF` → inline custom values to Helm via STDIN.
+* `config.clients.url` → where Promtail pushes logs (Loki service URL).
+* `snippets.extraScrapeConfigs` → add a scrape job.
+* `job_name: calico-cni` → label for this scrape.
+* `static_configs.targets: [localhost]` → dummy target (file tailing uses `__path__`).
+* `labels.job: calico-cni` → attach a `job` label; handy for LogQL.
+* `labels.__path__` → glob of files Promtail tails.
+* `extraVolumeMounts`/`extraVolumes` with `hostPath` → mount node’s `/var/log/calico/cni` read-only.
+* `get ds promtail` → confirm DaemonSet exists.
+* `logs ds/promtail --tail=100` → verify it started tailing files.
+
+### 4.4 Hook Grafana to Loki & verify
+
+* In Grafana (UI): **Settings → Data Sources → Add → Loki**
+
+  * **URL**: `http://loki.observability.svc.cluster.local:3100`
+* Go to **Explore**, run this LogQL query:
+
+  ```
+  {job="calico-cni"}
+  ```
+
+  Optionally refine:
+
+  * By node: `{job="calico-cni", host="worker-node-name"}` (depends on your labels)
+  * Search strings: `{job="calico-cni"} |= "ADD"` or `|= "DEL"`
+
+> Result: you’ll see the CNI plugin’s `ADD`/`DEL` entries from Step 3.
+
+---
+
+# 5) Ad-hoc collection (no Loki): copy a log bundle off the node
+
+### 5.1 Using `kubectl debug` + `tar` + `kubectl cp`
+
+```bash
+NODE=$(kubectl get nodes -o name | head -n1 | sed 's|node/||')
+kubectl debug node/$NODE -it --image=busybox:1.36 --privileged -- \
+  chroot /host sh -lc 'tar czf /tmp/cni-logs.tgz -C / var/log/calico/cni || true'
+
+DBG=$(kubectl get pods -A -o name | grep "node-debugger-$NODE" | head -n1 | sed 's|pod/||')
+NS=$(kubectl get pods -A | grep "$DBG" | awk '{print $1}')
+kubectl -n "$NS" cp "$DBG":/tmp/cni-logs.tgz ./cni-logs-$NODE.tgz
+ls -lh ./cni-logs-$NODE.tgz
+```
+
+**Flags/keywords**
+
+* `tar czf FILE -C / PATH`
+
+  * `c` create, `z` gzip, `f` filename, `-C /` change to `/` first.
+  * Archives `/var/log/calico/cni` into `/tmp/cni-logs.tgz`.
+* `kubectl ... cp POD:PATH LOCALPATH` → copy from pod to your machine.
+* `ls -lh` → human-readable size.
+
+### 5.2 (Alternative) Tiny DaemonSet that prints files (read-only)
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cni-log-reader
+  namespace: kube-system
+spec:
+  selector: { matchLabels: {app: cni-log-reader} }
+  template:
+    metadata: { labels: {app: cni-log-reader} }
+    spec:
+      hostPID: true
+      tolerations: [{operator: "Exists"}]
+      containers:
+      - name: reader
+        image: busybox:1.36
+        command: ["/bin/sh","-lc","while true; do for f in /var/log/calico/cni/*.log; do echo '====' $HOSTNAME : $f; tail -n +1 $f 2>/dev/null || true; done; sleep 15; done"]
+        volumeMounts:
+        - {name: cni, mountPath: /var/log/calico/cni, readOnly: true}
+      volumes:
+      - name: cni
+        hostPath: {path: /var/log/calico/cni, type: DirectoryOrCreate}
+EOF
+
+kubectl -n kube-system get ds cni-log-reader -o wide
+kubectl -n kube-system logs ds/cni-log-reader --tail=200 --prefix=true
+```
+
+**Flags/keywords**
+
+* `hostPID: true` → (not strictly required here) share host PID namespace.
+* `tolerations: [{operator: "Exists"}]` → schedule on tainted nodes (e.g., control plane) if present.
+* `tail -n +1` → print file from the first line.
+* `--tail=200` → last 200 lines.
+* `--prefix=true` → prefix lines with pod info.
+
+---
+
+# 6) (Optional) Turn Calico **Felix** verbosity up/down safely
+
+This affects `calico-node` (Felix) logs, **not** the CNI plugin file. Use only temporarily.
+
+### Before
+
+```bash
+kubectl get felixconfigurations
+kubectl get felixconfiguration default -o yaml | egrep -i 'logSeverityScreen|name:'
+```
+
+**Flags/keywords**
+
+* `get felixconfigurations` → list CRDs controlling Felix behavior.
+* `-o yaml` → full YAML manifest for inspection.
+* `egrep -i` → case-insensitive search.
+
+### Increase temporarily, then verify
+
+```bash
+kubectl patch felixconfiguration default --type=merge -p '{"spec":{"logSeverityScreen":"Debug"}}'
+kubectl -n "$CALICO_NS" rollout restart ds/calico-node
+kubectl get felixconfiguration default -o jsonpath='{.spec.logSeverityScreen}'; echo
+kubectl -n "$CALICO_NS" logs ds/calico-node --tail=100 | head
+```
+
+**Flags/keywords**
+
+* `patch ... --type=merge -p JSON` → merge-patch the resource.
+* `rollout restart ds/NAME` → restart pods controlled by the DaemonSet.
+* `-o jsonpath='{...}'` → extract a field value.
+* `head` → show first lines to confirm Debug logging.
+
+### Revert to sane defaults
+
+```bash
+kubectl patch felixconfiguration default --type=merge -p '{"spec":{"logSeverityScreen":"Info"}}'
+kubectl -n "$CALICO_NS" rollout restart ds/calico-node
+```
+
+---
+
+# 7) Validate end-to-end (fresh CNI events visible)
+
+### Trigger fresh activity
+
+```bash
+kubectl -n net-test run cni-c --image=registry.k8s.io/pause:3.9 --restart=Never
+kubectl -n net-test delete pod cni-c --wait=true
+```
+
+**Flags/keywords** → same as §3.2.
+
+### Verify (choose your path)
+
+**Continuous path (Grafana/Loki)**
+
+* Grafana → **Explore** → query:
+
+  ```
+  {job="calico-cni"}
+  ```
+
+  Add keyword filter: `|= "ADD"` or `|= "DEL"`.
+
+**Ad-hoc path (node tail via debug)**
+
+```bash
+NODE=$(kubectl get nodes -o name | head -n1 | sed 's|node/||')
+kubectl debug node/$NODE -it --image=busybox:1.36 --privileged -- \
+  chroot /host sh -lc 'tail -n 100 /var/log/calico/cni/cni.log'
+```
+
+**Flags/keywords**
+
+* `tail -n 100` → last 100 lines (should include the recent ADD/DEL).
+
+---
+
+# 8) (Optional) Add journald/kubelet logs (nice-to-have)
+
+CNI also logs to stderr (visible in kubelet/journald). If you want these too, extend Promtail:
+
+```bash
+helm upgrade promtail grafana/promtail -n observability --values - <<'EOF'
+config:
+  clients:
+    - url: http://loki.observability.svc.cluster.local:3100/loki/api/v1/push
+  snippets:
+    extraScrapeConfigs: |
+      - job_name: calico-cni
+        static_configs:
+          - targets: [localhost]
+            labels:
+              job: calico-cni
+              __path__: /var/log/calico/cni/*.log
+      - job_name: journald
+        journal:
+          path: /var/log/journal
+          max_age: 12h
+          labels:
+            job: systemd-journal
+        relabel_configs:
+          - source_labels: ['__journal__systemd_unit']
+            target_label: 'systemd_unit'
+extraVolumes:
+  - name: varlog-calico-cni
+    hostPath: {path: /var/log/calico/cni, type: DirectoryOrCreate}
+  - name: varlog-journal
+    hostPath: {path: /var/log/journal, type: DirectoryOrCreate}
+extraVolumeMounts:
+  - name: varlog-calico-cni
+    mountPath: /var/log/calico/cni
+    readOnly: true
+  - name: varlog-journal
+    mountPath: /var/log/journal
+    readOnly: true
+EOF
+
+kubectl -n observability rollout status ds/promtail
+```
+
+**Flags/keywords**
+
+* `helm upgrade ... --values -` → patch installed release with new values.
+* `journal:` block → Promtail’s journald scrape.
+* `max_age: 12h` → backlog window.
+* `rollout status ds/promtail` → wait until updated pods are ready.
+
+---
+
+# 9) Clean up (if this was a lab)
+
+```bash
+# Workloads that created CNI churn
+kubectl -n net-test delete job cni-churn --ignore-not-found
+kubectl -n net-test delete deploy cni-batch --ignore-not-found
+kubectl delete ns net-test --ignore-not-found
+
+# Optional ad-hoc reader
+kubectl -n kube-system delete ds cni-log-reader --ignore-not-found
+
+# Observability stack (if you don't want to keep it)
+helm uninstall promtail -n observability
+helm uninstall loki -n observability
+kubectl delete ns observability --ignore-not-found
+```
+
+**Flags/keywords**
+
+* `--ignore-not-found` → do not error if the resource is already gone.
+* `helm uninstall RELEASE -n NS` → remove Helm release.
+
+---
+
+## What you end up with
+
+* **Reliable, continuous** ingestion of **Calico CNI plugin logs** from `/var/log/calico/cni/*.log` into Loki; browsable in **Grafana** (`{job="calico-cni"}`).
+* A **repeatable load generator** (Deployment scale + Job churn) that creates lots of **ADD/DEL** CNI events.
+* A **one-shot export** path if you just need a tarball.
+* Optional toggles (Felix debug, journald scraping) to deepen troubleshooting without long-term noise.
+
+If you want, I can tailor the Promtail labels so each line includes **node**, **pod**, and **namespace** fields (handy for dashboards and filters).
