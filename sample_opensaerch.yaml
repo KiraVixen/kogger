@@ -52,3 +52,63 @@ kubectl apply -f opensearch-output.yaml
 
     Reference this Output in your Logging Operator Flow or ClusterFlow resources to route logs to OpenSearch.
 
+
+    To reference the OpenSearch Output in your Logging Operator Flow or ClusterFlow resource to route logs, you define the outputRefs field in the Flow spec to point to the output's name.
+
+Here is an example YAML for a Flow that sends logs to the opensearch-output you defined:
+
+text
+apiVersion: logging.banzaicloud.io/v1beta1
+kind: Flow
+metadata:
+  name: send-logs-to-opensearch
+  namespace: logging   # Namespace where your logs and output reside
+spec:
+  match:
+    - select:
+        labels:
+          logging: "enabled"   # Example label selector for pods to collect logs from
+  filters:
+    - parser:
+        key_name: message
+        parse:
+          type: json
+        reserve_data: true
+    - dedot:
+        de_dot_separator: "_"
+  outputRefs:
+    - opensearch-output   # Reference the Output resource by name
+
+Key points:
+
+    The outputRefs field should match the name of your Output resource (opensearch-output).
+
+    The Flow’s match section specifies which logs to collect (using labels, namespaces, etc.).
+
+    You can add filters to parse or transform the logs before sending.
+
+    Both Flow and Output resources need to be in the same namespace unless you use ClusterFlow/ClusterOutput for cluster-wide scope.
+
+Apply the Flow
+
+Save to file, e.g., opensearch-flow.yaml and apply:
+
+bash
+kubectl apply -f opensearch-flow.yaml
+
+Verification
+
+    The Logging Operator will create or update Fluentd/Fluent Bit pods accordingly.
+
+    Monitor logs of those pods for errors.
+
+    Logs matching the Flow criteria will be forwarded to your OpenSearch cluster.
+
+    Check the OpenSearch dashboard for incoming logs.
+
+If needed, I can help draft a ClusterFlow example or adjust the selectors to your use case.
+
+This approach links your logs collection pipeline from Kubernetes pods to your external OpenSearch for centralized monitoring and analysis.
+
+
+
