@@ -1,0 +1,54 @@
+a drafted Output YAML manifest for your OpenSearch cluster to use with the Logging Operator in Kubernetes:
+
+text
+apiVersion: logging.banzaicloud.io/v1beta1
+kind: Output
+metadata:
+  name: opensearch-output
+  namespace: logging # Change to your logging namespace if different
+spec:
+  opensearch:
+    host: "<your-opensearch-host>"    # e.g., opensearch-cluster.yourdomain.com
+    port: 9200                      # Default OpenSearch HTTP port
+    scheme: "https"                 # Use "http" if not TLS
+    tls:
+      insecureSkipVerify: true      # Set false if you use valid certs
+    auth:
+      username:
+        valueFrom:
+          secretKeyRef:
+            name: opensearch-credentials  # Kubernetes secret containing username
+            key: username
+      password:
+        valueFrom:
+          secretKeyRef:
+            name: opensearch-credentials  # Kubernetes secret containing password
+            key: password
+    logstashFormat: true             # Use Logstash-style indexing
+    logstashPrefix: "kubernetes-logs"  # Prefix for indices created
+    requestTimeout: 600s             # Request timeout for OpenSearch requests
+    sslVerify: false                 # Whether to verify SSL certs
+    buffer:
+      timekey: "1m"                 # Time window for buffer files
+      timekeyWait: "10s"
+      timekeyUseUTC: true
+      chunkLimitSize: "2m"
+      retryMaxInterval: "30"
+      retryForever: true
+      overflowAction: "block"
+
+How to use:
+
+    Replace <your-opensearch-host> with your OpenSearch cluster's host URL.
+
+    Create a Kubernetes secret named opensearch-credentials in the same namespace with your OpenSearch username and password.
+
+    Save this YAML as, e.g., opensearch-output.yaml.
+
+    Apply with:
+
+bash
+kubectl apply -f opensearch-output.yaml
+
+    Reference this Output in your Logging Operator Flow or ClusterFlow resources to route logs to OpenSearch.
+
