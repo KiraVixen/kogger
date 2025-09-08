@@ -165,3 +165,114 @@ You can verify the ingested logs by exploring the OpenSearch Dashboards and sear
 
 
 
+To show your cni.log (or any Calico CNI logs) in OpenSearch, you need to ensure that your Logging Operator pipeline collects those logs from the file location on your nodes or pods and forwards them to OpenSearch.
+
+Here’s how you can do that:
+1. Create a Flow resource to collect cni.log
+
+Since cni.log resides on nodes (for example, /var/log/calico/cni/cni.log), you need to configure Fluent Bit or Fluentd (managed by Logging Operator) to tail this file.
+
+Example of a Flow with a Host Tailer input for the CNI log file:
+
+text
+apiVersion: logging.banzaicloud.io/v1beta1
+kind: Flow
+metadata:
+  name: calico-cni-log-flow
+  namespace: logging
+spec:
+  match:
+    - select:
+        labels:
+          # You can match pods or nodes depending on your setup
+          app: calico-node
+  filters:
+    - dedot:
+        de_dot_separator: _
+  stdout: false
+  localOutputRefs:
+    - opensearch-output  # Reference to your OpenSearch Output
+  # Define an input specifically for host file tailing if needed
+  input:
+    hostTailer:
+      files:
+        - path: "/var/log/calico/cni/cni.log"
+          multiline:
+            delimiter: ""
+            flush_timeout: 5s
+
+2. Make sure your logging agent has permissions
+
+    The Fluent Bit or Fluentd pods must run with permissions to access the node's /var/log/calico/cni/cni.log (typically via a hostPath mount).
+
+    The Logging Operator deploys agents as DaemonSets running on every node, so they can be configured to tail host logs.
+
+Example volume mount for host logs in DaemonSet spec (usually configured by the operator):
+
+text
+volumes:
+  - name: varlog
+    hostPath:
+      path: /var/log
+      type: Directory
+containers:
+  - name: fluent-bit
+    volumeMounts:
+      - name: varlog
+        mountPath: /var/log
+
+3. Apply your updated Flow resource
+
+bash
+kubectl apply -f calico-cni-log-flow.yaml
+
+4. Verify logs in OpenSearch Dashboards
+
+    Check OpenSearch for indexed documents with your log prefix or index.
+
+    Search for keywords from cni.log entries.
+
+    Use OpenSearch Dashboard filters and queries to analyze these logs.
+
+Summary
+Step	Description
+Create Flow with hostTailer	Define hostTailer input for /var/log/calico/cni/cni.log
+Ensure permissions	DaemonSet volumes must mount /var/log on nodes
+Route Flow to Output	Reference your OpenSearch Output in Flow resource
+Apply and Monitor	Deploy Flow resource, observe logs in OpenSearch
+
+This setup enables your queryable Calico CNI logs inside OpenSearch for monitoring and security analysis.
+
+If needed, I can help draft the full DaemonSet updates or HostTailer volume mounts.To show your Calico cni.log in OpenSearch, configure your Logging Operator with a Flow resource that tails the /var/log/calico/cni/cni.log file on each node and sends it to your OpenSearch Output.
+
+Example Flow:
+
+text
+apiVersion: logging.banzaicloud.io/v1beta1
+kind: Flow
+metadata:
+  name: calico-cni-log-flow
+  namespace: logging
+spec:
+  match:
+    - select:
+        labels:
+          app: calico-node
+  filters:
+    - dedot:
+        de_dot_separator: _
+  localOutputRefs:
+    - opensearch-output   # Your OpenSearch Output reference
+  input:
+    hostTailer:
+      files:
+        - path: "/var/log/calico/cni/cni.log"
+          multiline:
+            delimiter: ""
+            flush_timeout: 5s
+
+Make sure your Fluent Bit/Fluentd pods run with permissions to access /var/log on the host (mounted via hostPath).
+
+Apply this Flow, and your CNI logs will start appearing in OpenSearch for analysis via OpenSearch Dashboards.
+
+
