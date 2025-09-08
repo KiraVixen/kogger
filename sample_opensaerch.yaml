@@ -110,5 +110,58 @@ If needed, I can help draft a ClusterFlow example or adjust the selectors to you
 
 This approach links your logs collection pipeline from Kubernetes pods to your external OpenSearch for centralized monitoring and analysis.
 
+The logs you can expect to see in your external OpenSearch cluster when configured via the Logging Operator to collect Kubernetes logs typically include:
+Types of Logs Expected in OpenSearch
+
+    Pod Container Logs
+
+        Standard output and error logs from containers running in your pods.
+
+        Includes application logs, errors, warnings, etc.
+
+    Kubernetes System Component Logs
+
+        Logs from control plane components visible in your cluster.
+
+        e.g., kubelet, scheduler, controller manager, API server logs if collected.
+
+    Node Logs
+
+        Logs related to node-level processes (systemd, kernel logs) if you configure host log collection.
+
+    Network Plugin Logs
+
+        Logs from plugins like Calico (e.g., CNI plugin logs, flow logs) if included in the logging flows.
+
+    Audit Logs
+
+        Kubernetes audit logs capturing API requests, useful for security and compliance.
+
+    Custom Application Logs
+
+        Logs emitted by your own applications deployed in the cluster.
+
+Format and Structure
+
+    Logs are typically stored in JSON format indexed by time-based indices (e.g., kubernetes-logs-YYYY.MM.DD).
+
+    Common fields include metadata like namespace, pod_name, container_name, log, timestamp, labels, and cluster info.
+
+    This structure allows powerful searching, filtering, and dashboarding in OpenSearch Dashboards.
+
+Summary
+Log Type	Description
+Pod Logs	stdout/stderr from containerized apps
+System Component Logs	kubelet, scheduler, etc.
+Node Logs	Node OS and system logs
+Network Plugin Logs	Calico or other CNI plugin logs
+Audit Logs	API access and modification tracking
+Application Logs	Custom logs from deployed applications
+
+If you specifically configured Flows to collect Calico or other logs, you'll see those in OpenSearch. Also, your Logging Operator configuration determines precisely which logs get forwarded.
+
+You can verify the ingested logs by exploring the OpenSearch Dashboards and searching indexes created with your configured logstashPrefix or index name.
+
+
 
 
