@@ -1,0 +1,89 @@
+To expose your external OpenSearch cluster to your existing Kubernetes cluster where Logging Operator is installed, here is a step-by-step approach:
+1. Create a Kubernetes Secret for OpenSearch Credentials (if needed)
+
+If your OpenSearch cluster requires authentication, create a Kubernetes secret with the username/password or certificates to use when sending logs:
+
+bash
+kubectl create secret generic opensearch-credentials \
+  --from-literal=username=admin \
+  --from-literal=password=your-password \
+  -n your-namespace
+
+2. Define an Output or ClusterOutput resource for Logging Operator
+
+Logging Operator can send logs to external OpenSearch clusters using Output or ClusterOutput custom resources.
+
+Example ClusterOutput targeting your external Opensearch:
+
+text
+apiVersion: logging.banzaicloud.io/v1beta1
+kind: ClusterOutput
+metadata:
+  name: external-opensearch
+spec:
+  opensearch:
+    host: "<opensearch-url-without-protocol>"
+    port: 9200
+    scheme: "https"
+    tls:
+      insecureSkipVerify: true  # If using self-signed certs
+    auth:
+      username:
+        valueFrom:
+          secretKeyRef:
+            name: opensearch-credentials
+            key: username
+      password:
+        valueFrom:
+          secretKeyRef:
+            name: opensearch-credentials
+            key: password
+
+Replace placeholders with your cluster name, URL, and credentials.
+3. Define a Flow resource to route logs to OpenSearch
+
+Example Flow selecting logs you want to send (pod logs, system logs):
+
+text
+apiVersion: logging.banzaicloud.io/v1beta1
+kind: Flow
+metadata:
+  name: send-to-opensearch
+  namespace: your-namespace
+spec:
+  match:
+    - selector:
+        matchLabels:
+          logging: "enabled"  # Example label
+  outputRefs:
+    - external-opensearch
+
+Adjust the selector or match rules to control what logs are sent.
+4. Apply the Configuration
+
+bash
+kubectl apply -f opensearch-credentials.yaml
+kubectl apply -f clusteroutput.yaml
+kubectl apply -f flow.yaml
+
+5. Verify Logs in OpenSearch Dashboard
+
+    Use the OpenSearch Dashboard URL to verify that logs from your cluster are arriving.
+
+    You can use port forwarding or your external URL depending on your setup.
+
+    Try: curl -v https://your-opensearch-url.com:9200
+
+Additional Tips
+
+    Ensure network connectivity from your Kubernetes cluster nodes (or Logging Operator pods) to the external OpenSearch cluster (firewall, VPN, etc.).
+
+    If you use Ingress or LoadBalancer services, ensure proper TLS certificates and DNS resolution.
+
+    Monitor Logging Operator and Fluent Bit/Fluentd pods to ensure log delivery without errors.
+
+This approach allows you to keep OpenSearch external while collecting logs securely and efficiently from your Kubernetes cluster via Logging Operator.
+
+If you want a more specific manifest or commands tailored to your setup, please share your OpenSearch cluster details (cluster name, URLs, namespace).
+
+
