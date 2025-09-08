@@ -87,3 +87,91 @@ This approach allows you to keep OpenSearch external while collecting logs secur
 If you want a more specific manifest or commands tailored to your setup, please share your OpenSearch cluster details (cluster name, URLs, namespace).
 
 
+
+============================
+=====second solution========
+============================
+
+To expose your existing external OpenSearch cluster to your Kubernetes cluster and collect Calico CNI logs using the installed Banzai Cloud Logging Operator, you need to:
+
+    Create an Output resource for OpenSearch in your cluster that tells the Logging Operator where and how to send logs.
+
+    Create a Flow resource that selects the Calico CNI logs (usually namespace, labels, or container names related to calico-node or CNI) and routes them to the OpenSearch Output.
+
+Suggested new files to create:
+1. Output Resource (e.g., opensearch-output.yaml)
+
+text
+apiVersion: logging.banzaicloud.io/v1beta1
+kind: Output
+metadata:
+  name: opensearch-output
+  namespace: logging  # or the namespace where your logging operator lives
+spec:
+  opensearch:
+    host: <your-opensearch-cluster-hostname>
+    port: 9200
+    scheme: http  # or https depending on your cluster
+    ssl_verify: false  # set true if you have proper TLS certs
+    logstash_format: true
+    logstash_prefix: calico-cni-logs
+    request_timeout: 600s
+    buffer:
+      timekey: "1m"
+      timekey_wait: "10s"
+      timekey_use_utc: true
+      chunk_limit_size: "2m"
+      retry_max_interval: "30"
+      retry_forever: true
+      overflow_action: "block"
+
+Replace <your-opensearch-cluster-hostname> with your external OpenSearch cluster URL or IP.
+2. Flow Resource (e.g., calico-cni-flow.yaml)
+
+text
+apiVersion: logging.banzaicloud.io/v1beta1
+kind: Flow
+metadata:
+  name: calico-cni-flow
+  namespace: logging  # same namespace as output or where fluentbit agents run
+spec:
+  filters:
+    - grep:
+        key: kubernetes.container_name
+        regexp: "calico-cni|calico-node" # adjust regex to match your CNI container logs
+  match: # Select logs from namespaces or labels where calico cni logs reside
+    - select:
+        namespaces:
+          - kube-system
+  localOutputRefs:
+    - opensearch-output
+
+Necessary changes to existing CRDs
+
+    No changes strictly needed to your installed CRDs.
+
+    You just create new instances of Output and Flow CRDs as shown above.
+
+    Ensure the namespace of your Logging Operator matches where you apply these resources.
+
+How this works
+
+    The Logging Operator deploys Fluent Bit or Fluentd agents on your nodes as DaemonSets.
+
+    The Flow resource filters logs from the calico cni or node containers (usually in kube-system namespace).
+
+    The Output resource configures where the logs are sent (your external OpenSearch).
+
+    Combined, the logs from /var/log/calico/cni/cni.log collected by agents get forwarded to your OpenSearch cluster for querying via the OpenSearch Dashboard.
+
+Additional tips
+
+    Verify your logging agents have permission to read Calico CNI logs from /var/log/calico/cni/cni.log.
+
+    You may need to add a VolumeMount and PodSecurityPolicy to FluentBit/Fluentd DaemonSet to access those logs if not already done.
+
+    If your OpenSearch cluster requires authentication, add username and password fields to the Output.
+
+    Test connectivity to OpenSearch from within your cluster before applying.
+
+
